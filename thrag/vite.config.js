@@ -91,6 +91,12 @@ function runScript({
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const vllmOrigin = env.VITE_VLLM_ORIGIN || 'http://localhost:8000'
+  const regularLlmModel = env.REGULAR_LLM_MODEL || 'gpt-4o-mini'
+  const regularLlmApiKey = env.REGULAR_LLM_API_KEY || ''
+  const regularLlmOrigin =
+    env.REGULAR_LLM_ORIGIN || 'https://api.openai.com'
+  const regularLlmChatPath =
+    env.REGULAR_LLM_CHAT_PATH || '/v1/chat/completions'
   const ragScriptPath =
     env.RAG_SECURITY_SCRIPT_PATH ||
     '/Users/joshilano/Downloads/rag_security_assessment.py'
@@ -107,6 +113,62 @@ export default defineConfig(({ mode }) => {
       {
         name: 'rag-security-assessment-api',
         configureServer(server) {
+          server.middlewares.use('/api/regular-chat', async (req, res) => {
+            if (req.method !== 'POST') {
+              res.statusCode = 405
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ error: 'Method not allowed' }))
+              return
+            }
+
+            if (!regularLlmApiKey) {
+              res.statusCode = 503
+              res.setHeader('Content-Type', 'application/json')
+              res.end(
+                JSON.stringify({
+                  error:
+                    'Regular LLM fallback is not configured. Set REGULAR_LLM_API_KEY.',
+                }),
+              )
+              return
+            }
+
+            try {
+              const body = await readRequestBody(req)
+              const payload = {
+                ...body,
+                model: body.model || regularLlmModel,
+              }
+              const response = await fetch(
+                `${regularLlmOrigin}${regularLlmChatPath}`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${regularLlmApiKey}`,
+                  },
+                  body: JSON.stringify(payload),
+                },
+              )
+              const text = await response.text()
+
+              res.statusCode = response.status
+              res.setHeader('Content-Type', 'application/json')
+              res.end(text)
+            } catch (error) {
+              res.statusCode = 500
+              res.setHeader('Content-Type', 'application/json')
+              res.end(
+                JSON.stringify({
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : 'Unknown regular LLM fallback error',
+                }),
+              )
+            }
+          })
+
           server.middlewares.use(
             '/api/rag-security-assessment',
             async (req, res) => {

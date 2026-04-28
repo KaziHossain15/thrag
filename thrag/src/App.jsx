@@ -36,6 +36,9 @@ const maxFeedbackIterations = 6
 
 const vllmModel =
   import.meta.env.VITE_VLLM_MODEL || 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
+const regularLlmModel = import.meta.env.VITE_REGULAR_LLM_MODEL || 'gpt-4o-mini'
+const staticFallbackMessage =
+  'The AI service is temporarily unavailable. Please try again another time.'
 
 const allowedRecommendationModels = [
   'GPT-4o',
@@ -710,6 +713,48 @@ function App() {
     return reply
   }
 
+  async function requestRegularLlmReply(userMessage) {
+    const response = await fetch('/api/regular-chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: regularLlmModel,
+        messages: [{ role: 'user', content: userMessage }],
+        temperature: 0,
+        top_p: 1,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Regular LLM request failed with status ${response.status}`)
+    }
+
+    const data = await response.json()
+    const reply = data.choices?.[0]?.message?.content
+
+    if (!reply) {
+      throw new Error('Regular LLM returned a response without a message.')
+    }
+
+    return reply
+  }
+
+  async function requestModelReplyWithFallback(userMessage) {
+    try {
+      return await requestVllmReply(userMessage)
+    } catch (vllmError) {
+      void vllmError
+      try {
+        return await requestRegularLlmReply(userMessage)
+      } catch (regularLlmError) {
+        void regularLlmError
+        return staticFallbackMessage
+      }
+    }
+  }
+
   async function requestRagSecurityAppendix() {
     const response = await fetch('/api/rag-security-assessment', {
       method: 'POST',
@@ -784,7 +829,7 @@ Formatting and quality rules:
 
     try {
       const [reply, appendixData] = await Promise.all([
-        requestVllmReply(userMessage),
+        requestModelReplyWithFallback(userMessage),
         requestRagSecurityAppendix(),
       ])
       setVetSoftwareReport(reply)
@@ -943,7 +988,7 @@ Rules:
 - Set "bestOverallModel" to one of the 5 recommended models.`
 
     try {
-      const reply = await requestVllmReply(userMessage)
+      const reply = await requestModelReplyWithFallback(userMessage)
       const validated = parseAndValidateModelRecommendations(reply)
 
       if (validated) {
@@ -961,7 +1006,7 @@ ${JSON.stringify(allowedRecommendationModels, null, 2)}
 Previous response:
 ${reply}`
 
-      const correctedReply = await requestVllmReply(correctionPrompt)
+      const correctedReply = await requestModelReplyWithFallback(correctionPrompt)
       const correctedValidated = parseAndValidateModelRecommendations(correctedReply)
 
       if (correctedValidated) {
@@ -1049,7 +1094,7 @@ Rules:
 - This is iteration ${nextIterationNumber} of ${maxFeedbackIterations}. Later iterations should become more specific.`
 
     try {
-      const reply = await requestVllmReply(userMessage)
+      const reply = await requestModelReplyWithFallback(userMessage)
       const questions = removeRepeatedQuestions(
         normalizeFeedbackQuestions(reply, nextIterationNumber),
         previousQuestions,
@@ -1203,7 +1248,7 @@ Return only valid JSON with exactly these string keys:
 Do not repeat or quote the user's prompt in the placeholder text. Make the placeholders useful and specific without echoing the original wording.`
 
     try {
-      const reply = await requestVllmReply(userMessage)
+      const reply = await requestModelReplyWithFallback(userMessage)
       setDetailHints(normalizeDetailHints(reply))
     } catch (requestError) {
       setDetailHints(createTailoredDetailHints())
