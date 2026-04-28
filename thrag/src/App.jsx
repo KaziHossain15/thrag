@@ -86,8 +86,6 @@ const modelProviderByName = {
   'Cohere Command R': 'Cohere',
 }
 
-const ragSecurityScriptPath = '/Users/joshilano/Downloads/rag_security_assessment.py'
-
 const ragSecurityScriptSummary = `Local MVP: Modular RAG + simulated garak hybrid security assessment.
 - Builds a local risk dataset and retrieves relevant risks with sentence-transformers/FAISS or TF-IDF fallback.
 - Loads simulated or JSON-based garak vulnerability results.
@@ -268,6 +266,28 @@ function parseRagAssessmentOutput(rawOutput) {
     narrativeReport,
     raw,
   }
+}
+
+function getModelSourceLabel(source) {
+  if (source === 'vllm') return 'vLLM'
+  if (source === 'regular-llm') return 'regular LLM fallback'
+  return 'static fallback'
+}
+
+function buildRagAppendixFallback({ source, reason }) {
+  const sourceLabel = getModelSourceLabel(source)
+  const failureReason = reason || 'RAG service unavailable.'
+
+  return `[DEBUG] tool=RAG security appendix
+[DEBUG] retrieval_query=fallback summary tied to ${sourceLabel}
+[DEBUG] risk_score_1to5=N/A
+[DEBUG] confidence_0to100=N/A
+================================================================================
+RAG APPENDIX FALLBACK
+================================================================================
+The RAG security appendix could not be generated. This fallback appendix is tied to the report source: ${sourceLabel}.
+Reason: ${failureReason}
+Action: Re-run when the RAG service is available to generate full retrieval-backed evidence.`
 }
 
 function parseAndValidateModelRecommendations(reply) {
@@ -553,8 +573,8 @@ function App() {
   const [isTestingModel, setIsTestingModel] = useState(false)
   const [vetSoftwareForm, setVetSoftwareForm] = useState(emptyVetSoftwareForm)
   const [vetSoftwareReport, setVetSoftwareReport] = useState('')
+  const [vetSoftwareReportSource, setVetSoftwareReportSource] = useState('vllm')
   const [vetAppendixOutput, setVetAppendixOutput] = useState('')
-  const [vetAppendixMeta, setVetAppendixMeta] = useState(null)
   const [isGeneratingVetReport, setIsGeneratingVetReport] = useState(false)
   const [session, setSession] = useState(null)
   const [isLoadingSession, setIsLoadingSession] = useState(Boolean(supabase))
@@ -665,8 +685,8 @@ function App() {
     setQuestionCache({})
     setVetSoftwareForm(emptyVetSoftwareForm)
     setVetSoftwareReport('')
+    setVetSoftwareReportSource('vllm')
     setVetAppendixOutput('')
-    setVetAppendixMeta(null)
   }
 
   function updateChooseSoftwareForm(event) {
@@ -741,18 +761,25 @@ function App() {
     return reply
   }
 
-  async function requestModelReplyWithFallback(userMessage) {
+  async function requestModelReplyWithFallbackDetailed(userMessage) {
     try {
-      return await requestVllmReply(userMessage)
+      const reply = await requestVllmReply(userMessage)
+      return { reply, source: 'vllm' }
     } catch (vllmError) {
       void vllmError
       try {
-        return await requestRegularLlmReply(userMessage)
+        const reply = await requestRegularLlmReply(userMessage)
+        return { reply, source: 'regular-llm' }
       } catch (regularLlmError) {
         void regularLlmError
-        return staticFallbackMessage
+        return { reply: staticFallbackMessage, source: 'static' }
       }
     }
+  }
+
+  async function requestModelReplyWithFallback(userMessage) {
+    const { reply } = await requestModelReplyWithFallbackDetailed(userMessage)
+    return reply
   }
 
   async function requestRagSecurityAppendix() {
@@ -782,8 +809,8 @@ function App() {
     setError('')
     setNotice('')
     setVetSoftwareReport('')
+    setVetSoftwareReportSource('vllm')
     setVetAppendixOutput('')
-    setVetAppendixMeta(null)
     setIsGeneratingVetReport(true)
 
     const userMessage = `You are an AI governance and model risk analyst.
@@ -828,18 +855,25 @@ Formatting and quality rules:
 - Do not suggest alternative models or "best options." Keep the analysis focused on vetting this model only.`
 
     try {
-      const [reply, appendixData] = await Promise.all([
-        requestModelReplyWithFallback(userMessage),
-        requestRagSecurityAppendix(),
-      ])
-      setVetSoftwareReport(reply)
-      setVetAppendixOutput(appendixData.output || '')
-      setVetAppendixMeta({
-        scriptPath: appendixData.scriptPath || ragSecurityScriptPath,
-        model: appendixData.model || vllmModel,
-        origin: appendixData.origin || '',
-        chatPath: appendixData.chatPath || '',
-      })
+      const replyResult = await requestModelReplyWithFallbackDetailed(userMessage)
+      let appendixOutput = ''
+
+      try {
+        const appendixData = await requestRagSecurityAppendix()
+        appendixOutput = appendixData.output || ''
+      } catch (appendixError) {
+        appendixOutput = buildRagAppendixFallback({
+          source: replyResult.source,
+          reason:
+            appendixError instanceof Error
+              ? appendixError.message
+              : 'Unknown RAG execution error.',
+        })
+      }
+
+      setVetSoftwareReport(replyResult.reply)
+      setVetSoftwareReportSource(replyResult.source)
+      setVetAppendixOutput(appendixOutput)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -1219,8 +1253,8 @@ Rules:
     setFeedbackIterations([])
     setVetSoftwareForm(emptyVetSoftwareForm)
     setVetSoftwareReport('')
+    setVetSoftwareReportSource('vllm')
     setVetAppendixOutput('')
-    setVetAppendixMeta(null)
   }
 
   async function goToChooseDetails(event) {
@@ -1718,7 +1752,13 @@ Do not repeat or quote the user's prompt in the placeholder text. Make the place
 
               {vetSoftwareReport && (
                 <div className="model-response" aria-live="polite">
-                  <h3>vLLM risk assessment report</h3>
+                  <h3>
+                    {vetSoftwareReportSource === 'vllm'
+                      ? 'vLLM risk assessment report'
+                      : vetSoftwareReportSource === 'regular-llm'
+                        ? 'LLM risk assessment report'
+                        : 'Fallback risk assessment report'}
+                  </h3>
                   <p>{vetSoftwareReport}</p>
                 </div>
               )}
@@ -1726,15 +1766,6 @@ Do not repeat or quote the user's prompt in the placeholder text. Make the place
               {vetAppendixOutput && (
                 <div className="model-response" aria-live="polite">
                   <h3>RAG security assessment appendix</h3>
-                  <p>
-                    Script: <code>{vetAppendixMeta?.scriptPath || ragSecurityScriptPath}</code>
-                  </p>
-                  <p>
-                    Runtime: <code>{vetAppendixMeta?.model || vllmModel}</code> via{' '}
-                    <code>{vetAppendixMeta?.origin || 'http://localhost:8000'}</code>
-                    {' '}
-                    <code>{vetAppendixMeta?.chatPath || '/v1/chat/completions'}</code>
-                  </p>
                   <p>{ragSecurityScriptSummary}</p>
                   {parsedVetAppendix ? (
                     <div className="appendix-sections">
