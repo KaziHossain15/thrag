@@ -747,11 +747,19 @@ function App() {
       }),
     })
 
+    const regularLlmText = await response.text()
     if (!response.ok) {
-      throw new Error(`Regular LLM request failed with status ${response.status}`)
+      let detail = `status ${response.status}`
+      try {
+        const errJson = JSON.parse(regularLlmText)
+        if (errJson?.error) detail = String(errJson.error)
+      } catch {
+        /* keep status-based detail */
+      }
+      throw new Error(`Regular LLM request failed (${detail})`)
     }
 
-    const data = await response.json()
+    const data = JSON.parse(regularLlmText)
     const reply = data.choices?.[0]?.message?.content
 
     if (!reply) {
@@ -795,13 +803,19 @@ function App() {
       }),
     })
 
+    const ragText = await response.text()
     if (!response.ok) {
-      throw new Error(
-        `RAG security assessment request failed with status ${response.status}`,
-      )
+      let detail = `status ${response.status}`
+      try {
+        const errJson = JSON.parse(ragText)
+        if (errJson?.error) detail = String(errJson.error)
+      } catch {
+        /* keep status-based detail */
+      }
+      throw new Error(`RAG security assessment request failed (${detail})`)
     }
 
-    return response.json()
+    return JSON.parse(ragText)
   }
 
   async function handleVetSoftwareSubmit(event) {
